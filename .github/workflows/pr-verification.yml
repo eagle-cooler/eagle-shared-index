@@ -1,0 +1,57 @@
+name: PR Authorization Check
+on:
+  pull_request:
+    types: [opened, reopened]
+
+jobs:
+  verify-authorization:
+    permissions:
+      contents: read
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract UUID from PR body
+        id: extract-uuid
+        run: |
+          UUID=$(echo "${{ github.event.pull_request.body }}" | awk '/### Entry UUID/{getline; print}' | xargs)
+          echo "uuid=$UUID" >> $GITHUB_OUTPUT
+
+      - name: Validate UUID format
+        id: validate-uuid
+        run: |
+          if [[ ! "${{ steps.extract-uuid.outputs.uuid }}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+            gh pr comment ${{ github.event.pull_request.number }} --body "❌ Invalid UUID format"
+            exit 1
+          fi
+
+      - name: Check entry existence
+        id: check-entry
+        run: |
+          EXISTS=$(jq -e ".[\"${{ steps.extract-uuid.outputs.uuid }}\"]" index-release.json index-no-release.json >/dev/null 2>&1; echo $?)
+          if [ "$EXISTS" -ne 0 ]; then
+            gh pr comment ${{ github.event.pull_request.number }} --body "❌ Entry not found in any index"
+            exit 1
+          fi
+
+      - name: Verify authorized user
+        id: check-authorization
+        run: |
+          AUTHORIZED_USERS=$(jq -r ".[\"${{ steps.extract-uuid.outputs.uuid }}\"].authorized_users[]" index-release.json index-no-release.json 2>/dev/null | sort -u)
+          if ! echo "$AUTHORIZED_USERS" | grep -qxF "${{ github.event.pull_request.user.login }}"; then
+            gh pr comment ${{ github.event.pull_request.number }} --body "⛔ User not authorized to modify this entry"
+            exit 1
+          fi
+
+      - name: Add verified label
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['verified']
+            }) 

@@ -1,0 +1,12 @@
+name: New Update Notify
+description: Request immediate update check for an entry
+title: "[Update] Check for new versions"
+labels: ["new-update-notify"]
+body:
+  - type: input
+    attributes:
+      label: Entry UUID
+      description: The UUID of the entry to check
+      placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    validations:
+      required: true 

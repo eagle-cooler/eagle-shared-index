@@ -1,0 +1,30 @@
+{
+  "8f788ab3-52e9-4190-a8c5-5ee1973ca968": {
+    "name": "zipper",
+    "url": "https://github.com/ZackaryW/eagle-zipper.git",
+    "versions": {
+      "v1.3.0": "https://github.com/ZackaryW/eagle-zipper/releases/download/v1.3.0/zipper-debug.eagleplugin"
+    },
+    "lastchecked": 1741829628.630,
+    "authorized_users": [
+      "ZackaryW"
+    ]
+  },
+  "703c5924-3cd1-46dc-ad4b-85e9e855d691": {
+    "name": "Code Editor",
+    "url": "https://github.com/ZackaryW/eagle-code-editor",
+    "versions": {
+      "v1.2.1": "https://github.com/ZackaryW/eagle-code-editor/releases/download/v1.2.1/Code.Editor-debug.eagleplugin",
+      "v1.1.3": "https://github.com/ZackaryW/eagle-code-editor/releases/download/v1.1.3/Code.Editor-debug.eagleplugin",
+      "v1.1.2": "https://github.com/ZackaryW/eagle-code-editor/releases/download/v1.1.2/Code.Editor-debug.eagleplugin",
+      "v1.1.1": "https://github.com/ZackaryW/eagle-code-editor/releases/download/v1.1.1/Code.Editor-debug.eagleplugin",
+      "v1.1.0": "https://github.com/ZackaryW/eagle-code-editor/releases/download/v1.1.0/Code.Editor-debug.eagleplugin",
+      "v1.0.1": "https://github.com/ZackaryW/eagle-code-editor/releases/download/v1.0.1/Code.Editor-debug.eagleplugin",
+      "v1.0.0": "https://github.com/ZackaryW/eagle-code-editor/releases/download/v1.0.0/Code.Editor-debug.eagleplugin"
+    },
+    "lastchecked": 1741832421.545,
+    "authorized_users": [
+      "ZackaryW"
+    ]
+  }
+}

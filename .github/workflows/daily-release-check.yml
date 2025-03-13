@@ -1,0 +1,85 @@
+name: Daily Release Check
+on:
+  schedule:
+    - cron: '0 5 * * *'  # Run daily at 5 AM UTC
+  workflow_dispatch:
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      keys: ${{ steps.get-keys.outputs.keys }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Get outdated keys
+        id: get-keys
+        run: |
+          CUTOFF=$(date -d "24 hours ago" +%s)
+          echo "keys=$(jq --arg cutoff "$CUTOFF" -c '
+            [to_entries[] | 
+            select((.value.lastchecked == null) or (.value.lastchecked <= ($cutoff | tonumber))) |
+            .key]' index-release.json)" >> $GITHUB_OUTPUT
+
+  process-entry:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Process all keys
+        env:
+          KEYS_JSON: ${{ needs.prepare.outputs.keys }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "$KEYS_JSON" | jq -r '.[]' | while read -r KEY; do
+            echo "Processing $KEY"
+            URL=$(jq -r ".[\"$KEY\"].url" index-release.json)
+            
+            # Fetch releases
+            REPO_URL=$(echo "$URL" | cut -d'/' -f4,5 | sed 's/\.git$//')
+            RELEASES=$(gh api repos/$REPO_URL/releases)
+            
+            # Process assets
+            PROCESSED_RELEASES=$(echo "$RELEASES" | jq -c '
+              map(. as $release | {
+                tag: $release.tag_name,
+                assets: [$release.assets[] | select(.name | test("\\.eagleplugin"; "i")) | {
+                  url: .browser_download_url,
+                  is_debug: (.name | test("debug"; "i"))
+                }]
+              } | .assets |= sort_by(.is_debug | not) | .assets[0] as $selected | 
+                if $selected then {tag_name: .tag, asset_url: $selected.url} else empty end)')
+            
+            # Update index
+            TIMESTAMP=$(date +%s.%3N)
+            jq --arg key "$KEY" \
+               --arg timestamp "$TIMESTAMP" \
+               --argjson processed "$PROCESSED_RELEASES" '
+              .[$key].lastchecked = ($timestamp | tonumber) |
+              reduce $processed[] as $release (.; 
+                .[$key].versions[$release.tag_name] as $existing |
+                if $existing | not then
+                  .[$key].versions += {($release.tag_name): $release.asset_url}
+                else . end) |
+              # Keep only last 10 versions sorted semver-style
+              .[$key].versions |= (
+                to_entries |
+                sort_by(.key | split(".") | map(tonumber)) |
+                reverse |
+                .[0:10] |
+                from_entries
+              )' index-release.json > tmp.json
+            
+            mv tmp.json index-release.json
+          done
+
+      - name: Commit changes
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git add index-release.json
+          git commit -m "Updated plugin versions" || echo "No changes to commit"
+          git push 

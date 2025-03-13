@@ -1,0 +1,29 @@
+name: Add Index Entry
+description: Template for adding new entries to indexes
+title: "[Index] Add new app {{app_name}}"
+labels: ["index-update"]
+body:
+  - type: dropdown
+    attributes:
+      label: Target Index
+      description: Select which index to add the entry to
+      options:
+        - release
+        - no-release
+      default: 0
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Entry URL
+      description: Full git repository URL
+      placeholder: "https://github.com/username/repo.git"
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Entry ID
+      description: Unique identifier for the entry (must be a valid UUID v4)
+      placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    validations:
+      required: true

@@ -1,0 +1,257 @@
+name: Index Entry Processing
+on:
+  issues:
+    types: [opened, reopened]
+
+jobs:
+  validate-entry:
+    permissions:
+      contents: read
+      issues: write
+    if: |
+      contains(github.event.issue.labels.*.name, 'index-update') &&
+      startsWith(github.event.issue.title, '[Index] Add new app')
+    runs-on: ubuntu-latest
+    outputs:
+      entry_id: ${{ steps.pass-data.outputs.id }}
+      entry_name: ${{ steps.pass-data.outputs.name }}
+      entry_url: ${{ steps.pass-data.outputs.url }}
+      entry_user: ${{ steps.pass-data.outputs.user }}
+      entry_created: ${{ steps.pass-data.outputs.created }}
+      target_index: ${{ steps.pass-data.outputs.index }}
+    steps:
+      - name: Check for existing success
+        id: check-existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          COMMENTS=$(gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments)
+          if echo "$COMMENTS" | grep -q "✅ All checks passed! Entry added to index."; then
+            gh issue comment ${{ github.event.issue.number }} --body "⚠️ Already processed - closing reopened issue"
+            gh issue close ${{ github.event.issue.number }}
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+      - name: Acknowledge issue
+        if: steps.check-existing.outputs.skip != 'true'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: "✅ Thank you for your submission! We're processing your request..."
+            })
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          path: ./repo
+
+      - name: Extract URL and ID
+        id: extract-fields
+        env:
+          BODY: ${{ github.event.issue.body }}
+          GH_TOKEN: ${{ github.token }}
+        working-directory: ./repo
+        run: |
+          # Extract target index from body
+          TARGET_INDEX=$(echo "$BODY" | awk '/### Target Index/{getline; getline; print}' | xargs)
+          
+          # Validate index selection
+          if [[ "$TARGET_INDEX" != "release" && "$TARGET_INDEX" != "no-release" ]]; then
+            gh issue comment ${{ github.event.issue.number }} --body "❌ Invalid index selection '$TARGET_INDEX'"
+            gh issue close ${{ github.event.issue.number }}
+            exit 1
+          fi
+
+          # Improved extraction for URL and ID
+          URL=$(echo "$BODY" | awk '/### Entry URL/{getline; while($0 !~ /http/) {getline}; print}' | xargs)
+          ID=$(echo "$BODY" | awk '/### Entry ID/{getline; while(!$0) {getline}; print}' | xargs)
+          
+          # Validate required fields
+          if [ -z "$URL" ] || [ -z "$ID" ]; then
+            gh issue comment ${{ github.event.issue.number }} --body "❌ Missing required fields in issue body"
+            gh issue close ${{ github.event.issue.number }}
+            exit 1
+          fi
+
+          # Shorten index name for file mapping
+          SIMPLE_INDEX=$(echo "$TARGET_INDEX" | sed 's/-index//')
+          
+          # Extract values from issue body
+          APP_NAME=$(echo "${{ github.event.issue.title }}" | awk -F'app ' '{print $2}' | xargs)
+
+          # Extract owner/repo from URL
+          REPO_OWNER=$(echo "$URL" | cut -d'/' -f4)
+          REPO_NAME=$(echo "$URL" | cut -d'/' -f5 | sed 's/\.git$//')
+
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "id=$ID" >> $GITHUB_OUTPUT
+          echo "repo_owner=$REPO_OWNER" >> $GITHUB_OUTPUT
+          echo "repo_name=$REPO_NAME" >> $GITHUB_OUTPUT
+          echo "app_name=$APP_NAME" >> $GITHUB_OUTPUT
+          echo "target_index=$SIMPLE_INDEX" >> $GITHUB_OUTPUT
+
+      - name: Check URL existence
+        id: url-check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: ./repo
+        run: |
+          # Clone repository to validate URL
+          git clone --depth 1 "${{ steps.extract-fields.outputs.url }}" temp-repo -q 2>&1 | tee clone.log || {
+            gh issue comment ${{ github.event.issue.number }} --body "❌ Invalid repository URL: $(cat clone.log)"
+            gh issue close ${{ github.event.issue.number }}
+            exit 1
+          }
+          rm -rf temp-repo
+
+      - name: Validate UUID format
+        id: uuid-check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ ! "${{ steps.extract-fields.outputs.id }}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+            gh issue comment ${{ github.event.issue.number }} --body "❌ Invalid UUID v4 format"
+            gh issue close ${{ github.event.issue.number }}
+            exit 1
+          fi
+
+      - name: Check for duplicate ID
+        id: duplicate-check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RELEASE_EXISTS=$(jq -e ".${{ steps.extract-fields.outputs.id }}" index-release.json >/dev/null 2>&1; echo $?)
+          NO_RELEASE_EXISTS=$(jq -e ".${{ steps.extract-fields.outputs.id }}" index-no-release.json >/dev/null 2>&1; echo $?)
+          
+          if [ "$RELEASE_EXISTS" -eq 0 ] || [ "$NO_RELEASE_EXISTS" -eq 0 ]; then
+            gh issue comment ${{ github.event.issue.number }} --body "❌ Duplicate ID found"
+            gh issue close ${{ github.event.issue.number }}
+            exit 1
+          fi
+
+      - name: Check for repository release
+        id: release-check
+        if: steps.extract-fields.outputs.target_index == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release list --repo "${{ steps.extract-fields.outputs.url }}" | grep -q "v"; then
+            gh issue comment ${{ github.event.issue.number }} --body "❌ Repository must have at least one release"
+            gh issue close ${{ github.event.issue.number }}
+            exit 1
+          fi
+
+      - name: Checkout target repository
+        id: checkout-repo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: ./repo
+        run: |
+          # Clone with full path and error handling
+          git clone --depth 1 "${{ steps.extract-fields.outputs.url }}" target-repo || {
+            gh issue comment ${{ github.event.issue.number }} --body "❌ Failed to clone repository"
+            gh issue close ${{ github.event.issue.number }}
+            exit 1
+          }
+
+      - name: Load and validate manifest
+        id: load-manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: ./repo/target-repo
+        run: |
+          # Verify directory structure first
+          if [ ! -f "manifest.json" ]; then
+            gh issue comment ${{ github.event.issue.number }} --body "❌ Missing manifest.json in repository"
+            gh issue close ${{ github.event.issue.number }}
+            exit 1
+          fi
+          
+          MANIFEST_ID=$(jq -r '.id' manifest.json)
+          MANIFEST_NAME=$(jq -r '.name' manifest.json)
+          
+          if [ "$MANIFEST_ID" != "${{ steps.extract-fields.outputs.id }}" ]; then
+            gh issue comment ${{ github.event.issue.number }} --body "❌ Manifest ID mismatch"
+            gh issue close ${{ github.event.issue.number }}
+            exit 1
+          fi
+          
+          if [ 
+                "$MANIFEST_NAME" != "{{manifest.app.name}}" &&
+                "$MANIFEST_NAME" != "${{ steps.extract-fields.outputs.app_name }}"
+          ]; then
+            gh issue comment ${{ github.event.issue.number }} --body "❌ Manifest name mismatch"
+            gh issue close ${{ github.event.issue.number }}
+            exit 1
+          fi
+          
+          echo "manifest_id=$MANIFEST_ID" >> $GITHUB_OUTPUT
+          echo "manifest_name=$MANIFEST_NAME" >> $GITHUB_OUTPUT
+
+      - name: Pass validated data
+        id: pass-data
+        if: |
+          steps.extract-fields.outcome == 'success' &&
+          steps.uuid-check.outcome == 'success' &&
+          steps.duplicate-check.outcome == 'success' &&
+          steps.load-manifest.outcome == 'success' &&
+          (steps.release-check.outcome == 'success' || steps.extract-fields.outputs.target_index != 'release')
+        run: |
+          echo "id=${{ steps.extract-fields.outputs.id }}" >> $GITHUB_OUTPUT
+          echo "name=${{ steps.extract-fields.outputs.app_name }}" >> $GITHUB_OUTPUT
+          echo "url=${{ steps.extract-fields.outputs.url }}" >> $GITHUB_OUTPUT
+          echo "user=${{ github.event.issue.user.login }}" >> $GITHUB_OUTPUT
+          echo "created=${{ github.event.issue.created_at }}" >> $GITHUB_OUTPUT
+          echo "index=${{ steps.extract-fields.outputs.target_index }}" >> $GITHUB_OUTPUT
+
+  process-entry:
+    needs: validate-entry
+    permissions:
+      contents: write
+      issues: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          path: ./repo
+
+      - name: Add to index
+        working-directory: ./repo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Map simplified index names to files
+          case "${{ needs.validate-entry.outputs.target_index }}" in
+            "release") INDEX_FILE="index-release.json" ;;
+            "no-release") INDEX_FILE="index-no-release.json" ;;
+            *) echo "❌ Invalid index: '${{ needs.validate-entry.outputs.target_index }}'"; exit 1 ;;
+          esac
+          
+          jq \
+            --arg id "${{ needs.validate-entry.outputs.entry_id }}" \
+            --arg name "${{ needs.validate-entry.outputs.entry_name }}" \
+            --arg url "${{ needs.validate-entry.outputs.entry_url }}" \
+            --arg user "${{ needs.validate-entry.outputs.entry_user }}" \
+            --arg created "${{ needs.validate-entry.outputs.entry_created }}" \
+            '.[$id] = {
+              name: $name,
+              url: $url,
+              versions: {},
+              lastchecked: 0,
+              authorized_users: [$user],
+            }' $INDEX_FILE > tmp.json && mv tmp.json $INDEX_FILE
+          
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git add $INDEX_FILE
+          git commit -m "Add new entry ${{ needs.validate-entry.outputs.entry_name }} to ${{ needs.validate-entry.outputs.target_index }}"
+          git push
+          
+          gh issue comment ${{ github.event.issue.number }} --body "✅ All checks passed! Entry added to index."
+          gh issue close ${{ github.event.issue.number }} 

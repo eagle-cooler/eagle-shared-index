@@ -1,0 +1,156 @@
+name: Manual Update Check
+on:
+  issues:
+    types: [opened, reopened]
+
+jobs:
+  process-manual-check:
+    permissions:
+      contents: write
+      issues: write
+    if: |
+      contains(github.event.issue.labels.*.name, 'new-update-notify') &&
+      startsWith(github.event.issue.title, '[Update] Check for new versions')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract UUID from issue
+        id: extract-uuid
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Use awk-based parsing from handle-index-issue.yml
+          UUID=$(echo "${{ github.event.issue.body }}" | awk '/### Entry UUID/{getline; while(!$0) getline; print}' | xargs)
+          
+          if [[ ! "$UUID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+            gh issue comment ${{ github.event.issue.number }} --body $'❌ Missing or invalid UUID format. Required format:\n```\n### Entry UUID\nxxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx\n```'
+            gh issue close ${{ github.event.issue.number }}
+            exit 1
+          fi
+          
+          echo "uuid=$(echo "$UUID" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+      - name: Validate UUID format
+        id: validate-uuid
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # This is now redundant but kept as a safety check
+          if [[ ! "${{ steps.extract-uuid.outputs.uuid }}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+            gh issue comment ${{ github.event.issue.number }} --body "❌ System error: UUID validation failed after extraction"
+            gh issue close ${{ github.event.issue.number }}
+            exit 1
+          fi
+
+      - name: Check entry existence
+        id: check-existence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! jq -e ".[\"${{ steps.extract-uuid.outputs.uuid }}\"]" index-release.json > /dev/null; then
+            gh issue comment ${{ github.event.issue.number }} --body "❌ Entry not found in release index"
+            gh issue close ${{ github.event.issue.number }}
+            exit 1
+          fi
+
+      - name: Check moderator status
+        id: check-mod
+        run: |
+          if [ -f "MODLIST" ] && grep -qxF "${{ github.event.issue.user.login }}" MODLIST; then
+            echo "is_mod=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_mod=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Verify cooldown period
+        id: check-cooldown
+        if: steps.check-mod.outputs.is_mod != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CURRENT_TS=$(date +%s)
+          LAST_CHECKED=$(jq -r ".[\"${{ steps.extract-uuid.outputs.uuid }}\"].lastchecked // 0" index-release.json)
+          
+          if (( $(echo "$CURRENT_TS - $LAST_CHECKED < 3600" | bc -l) )); then
+            gh issue comment ${{ github.event.issue.number }} --body "⚠️ Update check too frequent - last checked $(date -d @$LAST_CHECKED +'%Y-%m-%d %H:%M:%S')"
+            gh issue close ${{ github.event.issue.number }}
+            exit 0
+          fi
+
+      - name: Fetch all releases
+        id: fetch-releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          REPO_URL=$(jq -r ".[\"${{ steps.extract-uuid.outputs.uuid }}\"].url" index-release.json)
+          RELEASES=$(gh api repos/$(echo "$REPO_URL" | cut -d'/' -f4,5 | sed 's/\.git$//')/releases | jq -c '.[]')
+          echo "releases=$RELEASES" >> $GITHUB_OUTPUT
+
+      - name: Locate eagleplugin assets
+        id: find-assets
+        run: |
+          # Process all releases with debug asset priority
+          echo "${{ steps.fetch-releases.outputs.releases }}" | jq -c '
+            . as $release |
+            {
+              tag: $release.tag_name,
+              assets: [
+                $release.assets[] |
+                select(.name | test("\\.eagleplugin"; "i")) |
+                {
+                  url: .browser_download_url,
+                  is_debug: (.name | test("debug"; "i"))
+                }
+              ]
+            } |
+            .assets |= sort_by(.is_debug | not) |
+            .assets[0] as $selected |
+            if $selected then
+              {tag_name: .tag, asset_url: $selected.url}
+            else
+              empty
+            end' | jq -s . > processed_releases.json
+          
+          echo "processed_releases=$(cat processed_releases.json)" >> $GITHUB_OUTPUT
+
+      - name: Update index with all versions
+        id: update-index
+        run: |
+          TIMESTAMP=$(date +%s.%3N)
+          jq --arg id "${{ steps.extract-uuid.outputs.uuid }}" \
+             --arg timestamp "$TIMESTAMP" \
+             '.[$id].lastchecked = ($timestamp | tonumber) |
+              reduce inputs as $release (.;
+                .[$id].versions[$release.tag_name] as $existing |
+                if $existing | not then
+                  .[$id].versions += {($release.tag_name): $release.asset_url}
+                else
+                  .
+                end
+              )' index-release.json <<< '${{ steps.find-assets.outputs.processed_releases }}' > tmp.json
+          mv tmp.json index-release.json
+
+      - name: Commit and notify
+        if: ${{ steps.find-assets.outputs.processed_releases != '[]' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NAME=$(jq -r ".[\"${{ steps.extract-uuid.outputs.uuid }}\"].name" index-release.json)
+          NEW_VERSIONS=$(jq 'length' processed_releases.json)
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git add index-release.json
+          git commit -m "Added new versions to $NAME"
+          git push
+          gh issue comment ${{ github.event.issue.number }} --body "✅ Processed $NEW_VERSIONS releases for $NAME"
+          gh issue close ${{ github.event.issue.number }}
+
+      - name: No updates found
+        if: ${{ steps.find-assets.outputs.processed_releases == '[]' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue comment ${{ github.event.issue.number }} --body "ℹ️ No new .eagleplugin assets found in latest release"
+          gh issue close ${{ github.event.issue.number }}

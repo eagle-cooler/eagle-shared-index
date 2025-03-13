@@ -1,0 +1,12 @@
+name: Update Verification
+description: Verify pull request authorization
+title: "[Update] Authorized changes for entry"
+labels: ["verification-required"]
+body:
+  - type: input
+    attributes:
+      label: Entry UUID
+      description: The UUID of the entry being modified
+      placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    validations:
+      required: true 
